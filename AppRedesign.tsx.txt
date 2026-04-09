@@ -1,0 +1,657 @@
+import { useEffect, useState } from 'react'
+import {
+  BrowserRouter,
+  Link,
+  Navigate,
+  Route,
+  Routes,
+  useParams,
+} from 'react-router-dom'
+import { constituencies, constituencyMap, partyOrder } from './data/constituencies'
+import {
+  firebaseConfigured,
+  loadComments,
+  loadVotes,
+  saveComment,
+  saveVote,
+  signInWithGoogleAccount,
+  signOutCurrentUser,
+  subscribeToAuth,
+} from './services/firebase'
+import type {
+  AppUser,
+  CommentRecord,
+  CommentThread,
+  Constituency,
+  PartyKey,
+  VoteRecord,
+} from './types'
+import './redesign.css'
+
+const average = (votes: VoteRecord[]) =>
+  votes.length
+    ? votes.reduce((sum, vote) => sum + vote.score, 0) / votes.length
+    : 0
+
+const formatDate = (value: number) =>
+  new Intl.DateTimeFormat('en-IN', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(value)
+
+const buildThreads = (comments: CommentRecord[]): CommentThread[] =>
+  comments
+    .filter((comment) => !comment.parentId)
+    .map((comment) => ({
+      ...comment,
+      replies: comments.filter((reply) => reply.parentId === comment.id),
+    }))
+
+const districtCounts = constituencies.reduce<Record<string, number>>((accumulator, item) => {
+  accumulator[item.district] = (accumulator[item.district] || 0) + 1
+  return accumulator
+}, {})
+
+const topDistricts = Object.entries(districtCounts)
+  .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+  .slice(0, 6)
+
+const featuredConstituencies = ['thrissur', 'kochi', 'kazhakoottam', 'mananthavady']
+  .map((seatSlug) => constituencyMap.get(seatSlug))
+  .filter((value): value is Constituency => Boolean(value))
+
+const formatReservation = (reservation: Constituency['reservation']) =>
+  reservation === 'General' ? 'General constituency' : `${reservation} reserved constituency`
+
+function AppRedesign() {
+  const [user, setUser] = useState<AppUser | null>(null)
+
+  useEffect(() => subscribeToAuth(setUser), [])
+
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<HomePage user={user} onSignIn={setUser} />} />
+        <Route
+          path="/constituency/:slug"
+          element={<ConstituencyPage user={user} onSignIn={setUser} />}
+        />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </BrowserRouter>
+  )
+}
+
+function SiteHeader({
+  user,
+  onSignIn,
+  compact = false,
+}: {
+  user: AppUser | null
+  onSignIn: (user: AppUser | null) => void
+  compact?: boolean
+}) {
+  const signIn = async () => {
+    const nextUser = await signInWithGoogleAccount()
+    onSignIn(nextUser)
+  }
+
+  return (
+    <header className={`site-header${compact ? ' site-header-compact' : ''}`}>
+      <Link className="brand-mark" to="/">
+        <span className="brand-kicker">Kerala voter feedback platform</span>
+        <strong>KEPRION</strong>
+      </Link>
+
+      <div className="header-actions">
+        <p className="auth-chip">
+          {user
+            ? `Verified participant: ${user.name}`
+            : 'Read freely. Sign in to rate and comment.'}
+        </p>
+        {user ? (
+          <button
+            className="ghost-button"
+            onClick={() => void signOutCurrentUser().then(() => onSignIn(null))}
+          >
+            Sign out
+          </button>
+        ) : (
+          <button className="primary-button" onClick={() => void signIn()}>
+            Continue with Google
+          </button>
+        )}
+      </div>
+    </header>
+  )
+}
+
+function HomePage({
+  user,
+  onSignIn,
+}: {
+  user: AppUser | null
+  onSignIn: (user: AppUser | null) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [districtFilter, setDistrictFilter] = useState<string>('All districts')
+
+  const normalizedQuery = query.trim().toLowerCase()
+
+  const filteredConstituencies = constituencies.filter((constituency) => {
+    const matchesQuery =
+      !normalizedQuery ||
+      constituency.name.toLowerCase().includes(normalizedQuery) ||
+      constituency.district.toLowerCase().includes(normalizedQuery)
+
+    const matchesDistrict =
+      districtFilter === 'All districts' || constituency.district === districtFilter
+
+    return matchesQuery && matchesDistrict
+  })
+
+  const signIn = async () => {
+    const nextUser = await signInWithGoogleAccount()
+    onSignIn(nextUser)
+  }
+
+  return (
+    <main className="page page-home">
+      <div className="page-backdrop" />
+      <div className="app-shell">
+        <SiteHeader user={user} onSignIn={onSignIn} />
+
+        <section className="hero-panel">
+          <div className="hero-copy">
+            <p className="eyebrow">Kerala Election Public Rating Interface Network</p>
+            <h1>Track local sentiment before the vote reaches your booth.</h1>
+            <p className="hero-text">
+              KEPRION helps voters explore all 140 Kerala Assembly constituencies,
+              rate alliance momentum, and bring local development demands into one
+              public civic forum.
+            </p>
+
+            <div className="search-panel">
+              <label className="field-label" htmlFor="search-home">
+                Find your constituency
+              </label>
+              <div className="search-stack">
+                <input
+                  id="search-home"
+                  className="search-input"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Search constituency or district"
+                />
+                <select
+                  className="district-select"
+                  value={districtFilter}
+                  onChange={(event) => setDistrictFilter(event.target.value)}
+                >
+                  <option>All districts</option>
+                  {Object.keys(districtCounts).map((district) => (
+                    <option key={district}>{district}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="hero-actions">
+                <Link
+                  className="primary-button"
+                  to={
+                    filteredConstituencies[0]?.slug
+                      ? `/constituency/${filteredConstituencies[0].slug}`
+                      : '/'
+                  }
+                >
+                  Open first match
+                </Link>
+                <button className="ghost-button" onClick={() => void signIn()}>
+                  {user ? 'Switch verified account' : 'Verify to participate'}
+                </button>
+              </div>
+            </div>
+
+            <div className="trust-row">
+              <div className="trust-card">
+                <span>Public browsing</span>
+                <p>Anyone can explore constituency pages without signing in.</p>
+              </div>
+              <div className="trust-card">
+                <span>Verified participation</span>
+                <p>Google sign-in is required before submitting ratings or comments.</p>
+              </div>
+              <div className="trust-card">
+                <span>{firebaseConfigured ? 'Live data mode' : 'Demo mode active'}</span>
+                <p>
+                  {firebaseConfigured
+                    ? 'Votes and comments load from Firebase.'
+                    : 'The full experience works locally until Firebase keys are added.'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <aside className="hero-sidebar">
+            <div className="stat-card feature-card">
+              <span>140</span>
+              <p>Assembly constituencies searchable from one civic index.</p>
+            </div>
+            <div className="stat-card">
+              <span>3 alliances</span>
+              <p>LDF, UDF, and NDA each receive a dedicated rating lane.</p>
+            </div>
+            <div className="stat-card">
+              <span>{user ? 'Verified' : 'Open access'}</span>
+              <p>
+                {user
+                  ? 'You can rate alliances and join constituency discussions now.'
+                  : 'You can browse first and verify only when you are ready to participate.'}
+              </p>
+            </div>
+          </aside>
+        </section>
+
+        <section className="editorial-grid">
+          <article className="panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Featured constituencies</p>
+                <h2>Start with high-interest constituencies</h2>
+              </div>
+              <p className="support-note">
+                Quick entry points into prominent public conversations across Kerala.
+              </p>
+            </div>
+            <div className="featured-grid">
+              {featuredConstituencies.map((constituency) => (
+                <Link
+                  className="featured-card"
+                  key={constituency.slug}
+                  to={`/constituency/${constituency.slug}`}
+                >
+                  <span className="card-id">
+                    {constituency.id.toString().padStart(3, '0')}
+                  </span>
+                  <h3>{constituency.name}</h3>
+                  <p>{constituency.district}</p>
+                  <small>{formatReservation(constituency.reservation)}</small>
+                </Link>
+              ))}
+            </div>
+          </article>
+
+          <article className="panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">District coverage</p>
+                <h2>Browse by district first</h2>
+              </div>
+              <p className="support-note">
+                A faster path for voters who know the district but not the assembly seat.
+              </p>
+            </div>
+            <div className="district-list">
+              {topDistricts.map(([district, count]) => (
+                <button
+                  className={`district-pill${districtFilter === district ? ' district-pill-active' : ''}`}
+                  key={district}
+                  onClick={() => setDistrictFilter(district)}
+                >
+                  <strong>{district}</strong>
+                  <span>{count} constituencies</span>
+                </button>
+              ))}
+            </div>
+          </article>
+        </section>
+
+        <section className="panel explorer-panel">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Constituency explorer</p>
+              <h2>All 140 Assembly seats</h2>
+            </div>
+            <p className="support-note">
+              {filteredConstituencies.length} constituency pages match your current search.
+            </p>
+          </div>
+
+          {filteredConstituencies.length ? (
+            <div className="constituency-grid">
+              {filteredConstituencies.map((constituency) => (
+                <Link
+                  className="constituency-card"
+                  key={constituency.slug}
+                  to={`/constituency/${constituency.slug}`}
+                >
+                  <span className="card-id">
+                    {constituency.id.toString().padStart(3, '0')}
+                  </span>
+                  <h3>{constituency.name}</h3>
+                  <p>{constituency.district}</p>
+                  <small>{formatReservation(constituency.reservation)}</small>
+                </Link>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state">
+              <h3>No constituencies match that search yet.</h3>
+              <p>Try a different district name or search for the constituency directly.</p>
+            </div>
+          )}
+        </section>
+      </div>
+    </main>
+  )
+}
+
+function ConstituencyPage({
+  user,
+  onSignIn,
+}: {
+  user: AppUser | null
+  onSignIn: (user: AppUser | null) => void
+}) {
+  const { slug } = useParams()
+  const constituency = slug ? constituencyMap.get(slug) : null
+  const [votes, setVotes] = useState<VoteRecord[]>([])
+  const [comments, setComments] = useState<CommentRecord[]>([])
+  const [commentText, setCommentText] = useState('')
+  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    if (!constituency) {
+      return
+    }
+
+    const loadData = async () => {
+      const [nextVotes, nextComments] = await Promise.all([
+        loadVotes(constituency.slug),
+        loadComments(constituency.slug),
+      ])
+      setVotes(nextVotes)
+      setComments(nextComments)
+    }
+
+    void loadData()
+  }, [constituency])
+
+  if (!constituency) {
+    return <Navigate to="/" replace />
+  }
+
+  const refresh = async (current: Constituency) => {
+    const [nextVotes, nextComments] = await Promise.all([
+      loadVotes(current.slug),
+      loadComments(current.slug),
+    ])
+    setVotes(nextVotes)
+    setComments(nextComments)
+  }
+
+  const signIn = async () => {
+    const nextUser = await signInWithGoogleAccount()
+    onSignIn(nextUser)
+  }
+
+  const currentUserVotes = new Map(
+    votes.filter((vote) => vote.userId === user?.id).map((vote) => [vote.party, vote]),
+  )
+
+  const partySummaries = partyOrder.map((party) => {
+    const partyVotes = votes.filter((vote) => vote.party === party)
+    const ratingAverage = average(partyVotes)
+
+    return {
+      party,
+      average: ratingAverage,
+      count: partyVotes.length,
+      percentage: ratingAverage * 20,
+    }
+  })
+
+  const leader = [...partySummaries].sort((left, right) => right.average - left.average)[0]
+  const totalRatings = votes.length
+  const threads = buildThreads(comments)
+
+  const submitVote = async (party: PartyKey, score: number) => {
+    if (!user) {
+      await signIn()
+      return
+    }
+
+    await saveVote(constituency.slug, party, score, user)
+    await refresh(constituency)
+  }
+
+  const submitComment = async (parentId: string | null) => {
+    const body = parentId ? replyDrafts[parentId]?.trim() : commentText.trim()
+    if (!body) {
+      return
+    }
+
+    if (!user) {
+      await signIn()
+      return
+    }
+
+    await saveComment(constituency.slug, body, parentId, user)
+    if (parentId) {
+      setReplyDrafts((current) => ({ ...current, [parentId]: '' }))
+    } else {
+      setCommentText('')
+    }
+    await refresh(constituency)
+  }
+
+  return (
+    <main className="page page-detail">
+      <div className="page-backdrop" />
+      <div className="app-shell">
+        <SiteHeader user={user} onSignIn={onSignIn} compact />
+
+        <nav className="page-nav">
+          <Link to="/">All constituencies</Link>
+          <span>/</span>
+          <span>{constituency.name}</span>
+        </nav>
+
+        <section className="detail-hero panel">
+          <div className="detail-copy">
+            <p className="eyebrow">Assembly constituency #{constituency.id}</p>
+            <h1>{constituency.name}</h1>
+            <p className="hero-text">
+              {constituency.district} district - {formatReservation(constituency.reservation)}
+            </p>
+            <p className="support-note detail-note">
+              Browse local sentiment first. Sign in only when you want to rate alliances or
+              add development priorities for this constituency.
+            </p>
+          </div>
+
+          <div className="detail-highlight">
+            <div className="spotlight-card">
+              <span>Current lead</span>
+              <strong>{leader && leader.average > 0 ? leader.party : 'No ratings yet'}</strong>
+              <p>
+                {leader && leader.average > 0
+                  ? `${leader.average.toFixed(1)} / 5 average from ${leader.count} ratings`
+                  : 'This constituency is waiting for its first public rating.'}
+              </p>
+            </div>
+            <div className="mini-metrics">
+              <div>
+                <strong>{totalRatings}</strong>
+                <span>ratings recorded</span>
+              </div>
+              <div>
+                <strong>{threads.length}</strong>
+                <span>public issue threads</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="detail-layout">
+          <article className="panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Alliance rating</p>
+                <h2>How voters are rating the alliances here</h2>
+              </div>
+              <p className="support-note">
+                The leading alliance is highlighted in the chart. Ratings stay on a 1 to 5 scale.
+              </p>
+            </div>
+
+            <div className="rating-summary-row">
+              {partySummaries.map((summary) => (
+                <div
+                  className={`summary-card${summary.party === leader?.party && summary.average > 0 ? ' summary-card-leader' : ''}`}
+                  key={summary.party}
+                >
+                  <span>{summary.party}</span>
+                  <strong>{summary.average.toFixed(1)}</strong>
+                  <p>{summary.count} public ratings</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="rating-chart">
+              {partySummaries.map((summary) => (
+                <div className="chart-column" key={summary.party}>
+                  <div className="chart-meter">
+                    <div
+                      className={
+                        summary.party === leader?.party && summary.average > 0
+                          ? 'chart-bar chart-bar-leader'
+                          : 'chart-bar'
+                      }
+                      style={{ height: `${Math.max(summary.percentage, 8)}%` }}
+                    />
+                  </div>
+                  <strong>{summary.party}</strong>
+                  <span>{summary.average.toFixed(1)} / 5</span>
+                  <small>{summary.count} ratings</small>
+                </div>
+              ))}
+            </div>
+
+            <div className="vote-grid">
+              {partyOrder.map((party) => (
+                <div className="vote-card" key={party}>
+                  <div className="vote-card-header">
+                    <strong>{party}</strong>
+                    <span>
+                      Your rating:{' '}
+                      {currentUserVotes.get(party)?.score
+                        ? `${currentUserVotes.get(party)?.score}/5`
+                        : 'not rated'}
+                    </span>
+                  </div>
+                  <div className="score-buttons">
+                    {[1, 2, 3, 4, 5].map((score) => (
+                      <button
+                        className={`score-button${currentUserVotes.get(party)?.score === score ? ' score-button-active' : ''}`}
+                        key={`${party}-${score}`}
+                        onClick={() => void submitVote(party, score)}
+                      >
+                        {score}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </article>
+
+          <article className="panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Local issues</p>
+                <h2>What development should this constituency demand next?</h2>
+              </div>
+              <p className="support-note">
+                Public browsing stays open. Posting and replying requires verified sign-in.
+              </p>
+            </div>
+
+            <div className="composer-card">
+              <textarea
+                className="comment-box"
+                value={commentText}
+                onChange={(event) => setCommentText(event.target.value)}
+                placeholder="Write a local issue, civic gap, or development request for this constituency."
+                rows={5}
+              />
+              <div className="composer-actions">
+                <p className="support-note">
+                  {user
+                    ? `Posting as ${user.name}. Keep comments specific and constituency-focused.`
+                    : 'Sign in with Google to add a public issue or respond to another voter.'}
+                </p>
+                <button className="primary-button" onClick={() => void submitComment(null)}>
+                  Post issue
+                </button>
+              </div>
+            </div>
+
+            <div className="thread-list">
+              {threads.length ? null : (
+                <div className="empty-state empty-state-inline">
+                  <h3>No public issue threads yet.</h3>
+                  <p>The first verified voter can start the discussion for this constituency.</p>
+                </div>
+              )}
+
+              {threads.map((thread) => (
+                <div className="thread-card" key={thread.id}>
+                  <div className="thread-meta">
+                    <strong>{thread.userName}</strong>
+                    <span>{formatDate(thread.createdAt)}</span>
+                  </div>
+                  <p>{thread.body}</p>
+
+                  <div className="reply-list">
+                    {thread.replies.map((reply) => (
+                      <div className="reply-card" key={reply.id}>
+                        <div className="thread-meta">
+                          <strong>{reply.userName}</strong>
+                          <span>{formatDate(reply.createdAt)}</span>
+                        </div>
+                        <p>{reply.body}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  <textarea
+                    className="reply-box"
+                    value={replyDrafts[thread.id] || ''}
+                    onChange={(event) =>
+                      setReplyDrafts((current) => ({
+                        ...current,
+                        [thread.id]: event.target.value,
+                      }))
+                    }
+                    placeholder="Reply with a local perspective or supporting detail"
+                    rows={3}
+                  />
+                  <div className="thread-reply-action">
+                    <button
+                      className="ghost-button"
+                      onClick={() => void submitComment(thread.id)}
+                    >
+                      Reply
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </article>
+        </section>
+      </div>
+    </main>
+  )
+}
+
+export default AppRedesign
